@@ -1667,7 +1667,6 @@ public abstract class GLMTask  {
     private transient GLMWeights _w;
     //    final double _lambda;
     double wsum, wsumu;
-    double _sumsqe;
     int _c = -1;
 
     public  GLMIterationCODTask(Key jobKey, DataInfo dinfo, GLMWeightsFun glmw,double [] beta) {
@@ -1743,10 +1742,7 @@ public abstract class GLMTask  {
       ArrayUtils.add(_grad, git._grad);
       _gram.add(git._gram);
       _nobs += git._nobs;
-      wsum += git.wsum;
-      wsumu += git.wsumu;
       _likelihood += git._likelihood;
-      _sumsqe += git._sumsqe;
       super.reduce(git);
     }
 
@@ -1776,9 +1772,7 @@ public abstract class GLMTask  {
       }
     }
 
-    public boolean hasNaNsOrInf() {
-      return ArrayUtils.hasNaNsOrInfs(_grad) || _gram.hasNaNsOrInfs();
-    }
+
   }
 
  /* public static class GLMCoordinateDescentTask extends FrameTask2<GLMCoordinateDescentTask> {

@@ -552,7 +552,7 @@ public final class ComputationState {
     final double[] beta;
     final int[] activeCols;
     int [] newCols;
-    private double [] grads;
+    public double [] grads;
     public final double likelihood;
 
     public GramCOD(Gram gram, double [] grads, double[] beta, int[] activeCols, int [] newActiveCols, double likelihood) {
@@ -709,12 +709,16 @@ public final class ComputationState {
   GLMModel.GLMWeightsFun _glmw;
 
 
-  protected GramCOD computeNewGramCOD(DataInfo activeData, double [] beta, GLMParameters.Solver s){
+  protected GramCOD computeNewGramCOD(DataInfo activeData, double [] beta, double l2pen){
     double obj_reg = _parms._obj_reg;
     if(_glmw == null) _glmw = new GLMModel.GLMWeightsFun(_parms);
     GLMTask.GLMIterationCODTask gt = new GLMTask.GLMIterationCODTask(_job._key, activeData, _glmw, beta,_activeClass).doAll(activeData._adaptedFrame);
     gt._gram.mul(obj_reg);
     ArrayUtils.mult(gt._grad,obj_reg);
+    int lastIndex = gt._grad.length-1;
+    for (int index = 0; index < lastIndex; index++) {
+      gt._grad[index] += l2pen*beta[index]; // apply l2pen
+    }
     int [] activeCols = activeData.activeCols();
     int [] zeros = gt._gram.findZeroCols();
     GramCOD res;
@@ -730,18 +734,18 @@ public final class ComputationState {
     return res;
   }
   // get cached gram or incrementally update or compute new one
-  public GramCOD computeGramCOD(double [] beta, GLMParameters.Solver s){
+  public GramCOD computeGramCOD(double [] beta, double l2pen){
     double obj_reg = _parms._obj_reg;
     boolean weighted = _parms._family != Family.gaussian || _parms._link != GLMParameters.Link.identity;
 
     if(_currGramCOD == null) // no cached value, compute new one and store
-      return _currGramCOD = computeNewGramCOD(activeData(),beta,s);
+      return _currGramCOD = computeNewGramCOD(activeData(),beta, l2pen);
     DataInfo activeData = activeData();
     assert beta == null || beta.length == activeData.fullN()+1;
     int [] activeCols = activeData.activeCols();
     if (Arrays.equals(_currGramCOD.activeCols,activeCols))
       return (!weighted || Arrays.equals(_currGramCOD.beta, beta)) ? _currGramCOD :
-              (_currGramCOD = computeNewGramCOD(activeData, beta, s));
+              (_currGramCOD = computeNewGramCOD(activeData, beta, l2pen));
     if(_glmw == null) _glmw = new GLMModel.GLMWeightsFun(_parms);
     // check if we need full or just incremental update
     if(_currGram != null){
@@ -767,7 +771,7 @@ public final class ComputationState {
         return _currGramCOD = GramCOD.addCols(beta, activeCols, newColsIds, _currGramCOD, gt._gram, gt._xy);
       }
     }
-    return _currGramCOD = computeNewGramCOD(activeData,beta,s);
+    return _currGramCOD = computeNewGramCOD(activeData,beta,l2pen);
   }
 
 

@@ -804,19 +804,21 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
           iterCnt++;
           long t1 = System.currentTimeMillis();
           GLMBinomialGradientTask gt = new GLMBinomialGradientTask(_job._key, _dinfo, _parms, _state.l2pen(),betaCnd);
-          gt.set_calculateHess(true);
-          gt.doAll(_dinfo._adaptedFrame); // will give me grad, invHessDiag, likelihood
-          ComputationState.GramCOD gramCod = _state.computeGramCOD(betaCnd, s);
+        //  gt.set_calculateHess(true);
+        //  gt.doAll(_dinfo._adaptedFrame); // will give me grad, invHessDiag, likelihood
+       //   ComputationState.GramCOD gramCod = _state.computeGramCOD(betaCnd, _state.l2pen());
           ComputationState.GramXY gram = _state.computeGram(betaCnd,s); // change the beta coefficients here and calculate the likelihood with the new coefficients.
           long t2 = System.currentTimeMillis();
-          if (!_state._lsNeeded && (Double.isNaN(gt._likelihood) || _state.objective(gt._beta, gt._likelihood) > _state.objective() + _parms._objective_epsilon)) {
+          if (!_state._lsNeeded && (Double.isNaN(gram.likelihood) || _state.objective(gram.beta, gram.likelihood) > _state.objective() + _parms._objective_epsilon)) {
             _state._lsNeeded = true;
           } else {
-            if (!firstIter && !_state._lsNeeded && !progress(gt._beta, gt._likelihood)) { // assign new beta to _state and new likelihood there.
+            if (!firstIter && !_state._lsNeeded && !progress(gram.beta, gram.likelihood)) { // assign new beta to _state and new likelihood there.
               System.out.println("DONE after " + (iterCnt-1) + " iterations (1)");
               return;
             }
-            betaCndOld = COD_solve(gram,_state._alpha,_state.lambda());
+            betaCnd = COD_solve(gram,_state._alpha,_state.lambda());
+           // betaCndOld = COD_solve2(gramCod.gram.getXX(),gramCod.grads,gram.newCols,_state._alpha,_state.lambda());
+           // COD_solve(gram.gram.getXX(),gram.xy,gram.getCODGradients(),gram.newCols,alpha,lambda)
           }
           firstIter = false;
           long t3 = System.currentTimeMillis();
@@ -1626,6 +1628,100 @@ public class GLM extends ModelBuilder<GLMModel,GLMParameters,GLMOutput> {
       // intercept
       if(_parms._intercept) {
         double b = bc.applyBounds(grads[P] * wsumInv,P);
+        double bd = beta[P] - b;
+        double diff = bd * bd * xx[P][P];
+        if (diff > maxDiff) maxDiff = diff;
+        doUpdateCD(grads, xx[P], bd, P, P + 1);
+        beta[P] = b;
+      }
+      if (maxDiff < betaEpsilon) // stop if beta not changing much
+        break;
+    }
+    long tend = System.currentTimeMillis();
+    return beta;
+  }
+
+  private double [] COD_solve2(double [][] xx, double [] grads, int [] newCols, double alpha, double lambda) {
+    double wsumInv = 1.0/(xx[xx.length-1][xx.length-1]);
+    final double betaEpsilon = _parms._beta_epsilon*_parms._beta_epsilon;
+    double updateEpsilon = 0.01*betaEpsilon;
+    double l1pen = lambda * alpha;
+    double l2pen = lambda*(1-alpha);
+    double [] diagInv = MemoryManager.malloc8d(xx.length);
+    for(int i = 0; i < diagInv.length; ++i)
+      diagInv[i] = 1.0/(xx[i][i] + l2pen); // store the hessian for each coefficient
+    DataInfo activeData = _state.activeData();
+    int [][] nzs = new int[activeData.numStart()][];
+    int sparseCnt = 0;
+    if(nzs.length > 1000) {
+      final int [] nzs_ary = new int[xx.length];
+      for (int i = 0; i < activeData._cats; ++i) {
+        int var_min = activeData._catOffsets[i];
+        int var_max = activeData._catOffsets[i + 1];
+        for(int l = var_min; l < var_max; ++l) {
+          int k = 0;
+          double [] x = xx[l];
+          for (int j = 0; j < var_min; ++j)
+            if (x[j] != 0) nzs_ary[k++] = j;
+          for (int j = var_max; j < activeData.numStart(); ++j)
+            if (x[j] != 0) nzs_ary[k++] = j;
+          if (k < ((nzs_ary.length - var_max + var_min) >> 3)) {
+            sparseCnt++;
+            nzs[l] = Arrays.copyOf(nzs_ary, k);
+          }
+        }
+      }
+    }
+    final BetaConstraint bc = _state.activeBC();
+    double [] beta = _state.beta().clone();
+    int numStart = activeData.numStart();
+    if(newCols != null) {
+      for (int id : newCols) {
+        double b = bc.applyBounds(beta[id]-(ADMM.shrinkage(grads[id], l1pen) * diagInv[id]), id);
+        if (b != 0) {
+          doUpdateCD(grads, xx[id], -b, id, id + 1);
+          beta[id] = b;
+        }
+      }
+    }
+    int iter1 = 0;
+    int P = grads.length - 1;
+    double maxDiff = 0;
+//    // CD loop
+    while (iter1++ < Math.max(P,500)) {
+      maxDiff = 0;
+      for (int i = 0; i < activeData._cats; ++i) {
+        for(int j = activeData._catOffsets[i]; j < activeData._catOffsets[i+1]; ++j) { // can do in parallel
+          double b = bc.applyBounds(beta[j]-(ADMM.shrinkage(grads[j], l1pen) * diagInv[j]),j); // new beta value here with l1pen is applicable
+          double bd = beta[j] - b;
+          if(bd != 0) {
+            double diff = bd*bd*xx[j][j];
+            if(diff > maxDiff) maxDiff = diff;
+            if (nzs[j] == null)
+              doUpdateCD(grads, xx[j], bd, activeData._catOffsets[i], activeData._catOffsets[i + 1]);
+            else {
+              double[] x = xx[j];
+              int[] ids = nzs[j];
+              for (int id : ids) grads[id] += bd * x[id];
+              doUpdateCD(grads, x, bd, 0, activeData.numStart());
+            }
+            beta[j] = b;
+          }
+        }
+      }
+      for (int i = numStart; i < P; ++i) {
+        double b = bc.applyBounds(beta[i]-(ADMM.shrinkage(grads[i], l1pen) * diagInv[i]),i);
+        double bd = beta[i] - b;
+        double diff = bd * bd * xx[i][i];
+        if (diff > maxDiff) maxDiff = diff;
+        if(diff > updateEpsilon) {
+          doUpdateCD(grads, xx[i], bd, i, i + 1);
+          beta[i] = b;
+        }
+      }
+      // intercept
+      if(_parms._intercept) {
+        double b = bc.applyBounds(beta[P]-grads[P] * wsumInv,P);
         double bd = beta[P] - b;
         double diff = bd * bd * xx[P][P];
         if (diff > maxDiff) maxDiff = diff;
